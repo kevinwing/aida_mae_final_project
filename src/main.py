@@ -1,11 +1,27 @@
 import tensorflow as tf
-from tensorflow.keras import Sequential
-from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense
+import tensorflow.keras.backend as K
+from tensorflow.keras import Sequential, Model, Input
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Reshape
+import cv2
+import numpy as np
+
+import albumentations as A
+
+# Albumentations transform for resizing
+transform = A.Compose(
+    [
+        A.Resize(1024, 1024, always_apply=True)
+    ],
+    bbox_params=A.BboxParams(format='pascal_voc', label_fields=['class_labels'])
+)
+
+BATCH_SIZE = 8
 
 
-def preprocess(image_path, label_path):
+
+def preprocess_with_albumentations(image_path, label_path):
     """
-    Preprocess a single image and its corresponding labels.
+    Preprocess a single image and its corresponding labels using Albumentations.
     
     Args:
         image_path (tf.Tensor): Path to the image file.
@@ -14,85 +30,60 @@ def preprocess(image_path, label_path):
     Returns:
         tf.Tensor, tf.Tensor: Preprocessed image and labels.
     """
-    # Load and decode the image
-    img = tf.io.read_file(image_path)
-    img = tf.image.decode_jpeg(img, channels=3)  # Decode image
+    # Load the image
+    image_path_str = image_path.numpy().decode("utf-8")
+    image = cv2.imread(image_path_str)
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-    # Get original dimensions
-    original_shape = tf.shape(img)[:2]  # [height, width]
-    height, width = tf.cast(original_shape[0], tf.float32), tf.cast(original_shape[1], tf.float32)
-
-    # Calculate scale factor to resize while preserving aspect ratio
-    scale = 1024.0 / tf.maximum(height, width)
-    new_height = tf.cast(height * scale, tf.int32)
-    new_width = tf.cast(width * scale, tf.int32)
-
-    # Resize the image while maintaining aspect ratio
-    img = tf.image.resize(img, [new_height, new_width])
-
-    # Pad the image to make it 1024 × 1024
-    img = tf.image.resize_with_pad(img, 1024, 1024)
-
-    # Normalize the image
-    img = img / 255.0  # Normalize to [0, 1]
-
-    # Load and parse labels
-    def parse_labels(label_file):
-        boxes = []
+    # Load labels in TensorFlow format
+    def load_labels(label_file):
+        bboxes = []
+        class_labels = []
         with open(label_file.numpy().decode("utf-8"), "r") as f:
             for line in f:
-                class_id, x_center, y_center, width, height = map(float, line.strip().split())
-                # Convert YOLO format to TensorFlow format
-                xmin = (x_center - width / 2) * width
-                ymin = (y_center - height / 2) * height
-                xmax = (x_center + width / 2) * width
-                ymax = (y_center + height / 2) * height
-                boxes.append([class_id, xmin, ymin, xmax, ymax])
-        return tf.convert_to_tensor(boxes, dtype=tf.float32)
+                class_id, xmin, ymin, xmax, ymax = map(float, line.strip().split())
+                bboxes.append([xmin, ymin, xmax, ymax])  # Pascal VOC format
+                class_labels.append(int(class_id))
+        return bboxes, class_labels
 
-    labels = tf.py_function(func=parse_labels, inp=[label_path], Tout=tf.float32)
+    bboxes, class_labels = load_labels(label_path)
 
-    # Adjust labels to match padded image coordinates
-    labels = adjust_bboxes_to_padding(labels, height, width, new_height, new_width)
+    # Apply Albumentations transform
+    augmented = transform(image=image, bboxes=bboxes, class_labels=class_labels)
+    resized_image = augmented["image"]
+    resized_bboxes = augmented["bboxes"]
+    resized_labels = augmented["class_labels"]
 
-    # Set shapes explicitly
-    img.set_shape([1024, 1024, 3])
-    labels.set_shape([None, 5])  # Assuming labels are [class_id, xmin, ymin, xmax, ymax]
-    return img, labels
+    # Combine class IDs with resized bounding boxes
+    tf_bboxes = []
+    for i, bbox in enumerate(resized_bboxes):
+        xmin, ymin, xmax, ymax = bbox
+        class_id = resized_labels[i]
+        tf_bboxes.append([class_id, xmin, ymin, xmax, ymax])
+
+    # Normalize image
+    resized_image = resized_image.astype(np.float32) / 255.0
+
+    return resized_image, tf.convert_to_tensor(tf_bboxes, dtype=tf.float32)
 
 
-def adjust_bboxes_to_padding(labels, original_height, original_width, resized_height, resized_width):
+def preprocess(image_path, label_path):
     """
-    Adjust bounding boxes to account for padding applied during aspect-ratio resizing.
-    Args:
-        labels (tf.Tensor): Bounding boxes in TensorFlow format.
-        original_height (float): Original image height.
-        original_width (float): Original image width.
-        resized_height (float): Resized image height.
-        resized_width (float): Resized image width.
-    Returns:
-        tf.Tensor: Adjusted bounding boxes.
+    Wrapper to handle Albumentations preprocessing in TensorFlow.
     """
-    # Calculate padding applied to make the image 1024x1024
-    y_pad = (1024 - resized_height) / 2
-    x_pad = (1024 - resized_width) / 2
-
-    # Adjust bounding boxes
-    adjusted_bboxes = []
-    for label in labels:
-        class_id, xmin, ymin, xmax, ymax = label.numpy()
-        xmin = xmin * resized_width / original_width + x_pad
-        xmax = xmax * resized_width / original_width + x_pad
-        ymin = ymin * resized_height / original_height + y_pad
-        ymax = ymax * resized_height / original_height + y_pad
-        adjusted_bboxes.append([class_id, xmin, ymin, xmax, ymax])
-
-    return tf.convert_to_tensor(adjusted_bboxes, dtype=tf.float32)
+    image, labels = tf.py_function(
+        func=preprocess_with_albumentations,
+        inp=[image_path, label_path],
+        Tout=(tf.float32, tf.float32)
+    )
+    image.set_shape([1024, 1024, 3])  # Ensure TensorFlow recognizes the shape
+    labels.set_shape([None, 5])       # [class_id, xmin, ymin, xmax, ymax]
+    return image, labels
 
 
 def load_dataset(image_dir, label_dir):
     """
-    Load and preprocess the dataset for TensorFlow.
+    Load and preprocess the dataset using Albumentations.
     
     Args:
         image_dir (str): Path to the images directory.
@@ -110,26 +101,56 @@ def load_dataset(image_dir, label_dir):
 
     # Apply the preprocessing function
     dataset = dataset.map(
-        lambda img, lbl: tf.py_function(func=preprocess, inp=[img, lbl], Tout=(tf.float32, tf.float32)),
+        lambda img, lbl: preprocess(img, lbl),
         num_parallel_calls=tf.data.AUTOTUNE
     )
 
     # Batch and prefetch the dataset
-    dataset = dataset.batch(16).prefetch(tf.data.AUTOTUNE)  # Adjust batch size as needed
+    dataset = dataset.padded_batch(
+        BATCH_SIZE,
+        padded_shapes=(
+            [1024, 1024, 3],
+            [None, 5]
+        ),
+        padding_values=(
+            0.0,
+            -1.0
+        )
+    ).prefetch(tf.data.AUTOTUNE)  # Adjust batch size as needed
+
     return dataset
 
 
-def build_cnn(input_shape=(224, 224, 3), num_classes=5):
-    model = Sequential([
-        Conv2D(32, (3, 3), activation='relu', input_shape=input_shape),
-        MaxPooling2D((2, 2)),
-        Conv2D(64, (3, 3), activation='relu'),
-        MaxPooling2D((2, 2)),
-        Flatten(),
-        Dense(128, activation='relu'),
-        Dense(num_classes, activation='softmax')  # For classification
-    ])
-    model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+def custom_bbox_loss(y_true, y_pred):
+    mask = K.cast(K.not_equal(y_true, -1.0), K.floatx())
+    squared_diff = K.square((y_true - y_pred) * mask)
+    return K.sum(squared_diff) / K.sum(mask)
+
+
+def build_cnn(input_shape=(1024, 1024, 3), num_classes=1):
+    inputs = Input(shape=input_shape)
+
+    x = Conv2D(32, (3, 3), activation='relu')(inputs)
+    x = MaxPooling2D((2, 2),)(x)
+    x = Conv2D(64, (3, 3), activation='relu')(x)
+    x = MaxPooling2D((2, 2))(x)
+    x = Flatten()(x)
+
+    class_output = Dense(1, activation='sigmoid', name='class_output')(x)
+
+    bbox_output = Dense(4, activation='linear', name='bbox_output')(x)
+
+    model = Model(inputs=inputs, outputs=[class_output, bbox_output])
+
+    model.compile(
+        optimizer='adam',
+        loss={
+            'class_output': 'binary_crossentropy',
+            'bbox_output': custom_bbox_loss
+        },
+        metrics={'class_output': 'accuracy'}
+    )
+    
     return model
 
 
@@ -137,6 +158,10 @@ if __name__ == '__main__':
     # Load train and validation datasets
     train_dataset = load_dataset("/run/media/krw/PortableSSD/fall_2024_augmented_dataset/tensorflow_dataset/train/images", "/run/media/krw/PortableSSD/fall_2024_augmented_dataset/tensorflow_dataset/train/labels")
     val_dataset = load_dataset("/run/media/krw/PortableSSD/fall_2024_augmented_dataset/tensorflow_dataset/val/images", "/run/media/krw/PortableSSD/fall_2024_augmented_dataset/tensorflow_dataset/val/labels")
+
+    for image, labels in train_dataset.take(1):
+        print(f"Image batch shape: {image.shape}")
+        print(f"Label batch shape: {labels.shape}")
 
     cnn_model = build_cnn(input_shape=(1024, 1024, 3))
     cnn_model.summary()
