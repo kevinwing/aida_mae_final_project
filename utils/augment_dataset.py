@@ -26,6 +26,7 @@ transform = A.Compose([
     A.RandomGamma(p=0.5),
     A.Blur(blur_limit=3, p=0.3),
     A.CLAHE(p=0.5),
+    A.Resize
 ], bbox_params=A.BboxParams(format='yolo', label_fields=['category_ids']))
 
 def get_image_hash(image):
