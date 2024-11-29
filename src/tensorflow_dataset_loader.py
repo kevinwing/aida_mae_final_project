@@ -135,8 +135,8 @@ def load_dataset(image_dir, label_dir, batch_size=16):
     """
     Load and preprocess the dataset, with batching.
     """
-    image_files = tf.data.Dataset.list_files(f"{image_dir}/*.jpg")
-    label_files = tf.data.Dataset.list_files(f"{label_dir}/*.txt")
+    image_files = tf.data.Dataset.list_files(f"{image_dir}")
+    label_files = tf.data.Dataset.list_files(f"{label_dir}")
 
     def _parse(image_path, label_path):
         img, (class_labels, bbox_coordinates) = parse_dataset(image_path, label_path)
