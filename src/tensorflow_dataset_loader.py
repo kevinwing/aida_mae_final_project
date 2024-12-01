@@ -134,7 +134,7 @@ def parse_dataset(image_path, label_path):
 def _parse(image_path, label_path, normalize_bbox=False, model_type="faster_rcnn", max_rois=100):
     """
     Generalized parsing function for CNN, R-FCN, and Faster R-CNN.
-
+    Load and preprocess the dataset, with batching.
     Args:
         image_path: Path to the input image.
         label_path: Path to the corresponding label.
@@ -145,6 +145,7 @@ def _parse(image_path, label_path, normalize_bbox=False, model_type="faster_rcnn
     Returns:
         Tuple of inputs and labels, formatted for the specified model type.
     """
+
     img, (class_labels, bbox_coordinates) = parse_dataset(image_path, label_path)
 
     if normalize_bbox:
