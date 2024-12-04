@@ -3,7 +3,7 @@ from tensorflow.keras import Model
 from tensorflow.keras.layers import Input, Conv2D, Dense, Flatten, MaxPooling2D, GlobalAveragePooling2D
 
 # Import the YOLO dataset loader
-from tensorflow_dataset_loader import load_yolo_dataset
+from faster_rcnn_loader import load_yolo_dataset
 import json
 
 

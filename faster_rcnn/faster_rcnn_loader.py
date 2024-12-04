@@ -112,7 +112,18 @@ def parse_yolo_labels(label_path, img_width, img_height, scale, offset_y, offset
     """
     # Read YOLO labels from the file
     labels = tf.io.read_file(label_path)
+    labels = tf.strings.strip(labels)  # Remove extra whitespace
     labels = tf.strings.split(labels, '\n')
+
+    # Check for empty label file
+    def is_valid_label(label):
+        return tf.strings.length(label) > 0
+
+    labels = tf.boolean_mask(labels, is_valid_label)
+
+    # Return empty tensors if no labels are found
+    if tf.size(labels) == 0:
+        return tf.zeros((0, 4), dtype=tf.float32), tf.zeros((0,), dtype=tf.float32)
 
     # Parse each line into [class_id, center_x, center_y, width, height]
     parsed = tf.map_fn(
@@ -121,10 +132,14 @@ def parse_yolo_labels(label_path, img_width, img_height, scale, offset_y, offset
         fn_output_signature=tf.float32
     )
 
-    # Convert YOLO format to [xmin, ymin, xmax, ymax]
+    # Ensure parsed tensor has the expected shape
+    parsed = tf.ensure_shape(parsed, [None, 5])
+
+    # Extract individual components
     class_ids = parsed[:, 0]
     center_x, center_y, bbox_width, bbox_height = tf.unstack(parsed[:, 1:], axis=1)
 
+    # Convert YOLO format to [xmin, ymin, xmax, ymax]
     xmin = center_x - (bbox_width / 2)
     ymin = center_y - (bbox_height / 2)
     xmax = center_x + (bbox_width / 2)
@@ -136,6 +151,23 @@ def parse_yolo_labels(label_path, img_width, img_height, scale, offset_y, offset
     bboxes = adjust_bboxes(bboxes, scale, offset_y, offset_x, img_width, img_height, target_size)
 
     return bboxes, class_ids
+
+
+def parse_fn(image_path, label_path):
+    target_size = 1024
+    try:
+        img, img_width, img_height, scale, offset_y, offset_x = parse_image(image_path, target_size)
+        bboxes, class_ids = parse_yolo_labels(label_path, img_width, img_height, scale, offset_y, offset_x, target_size)
+
+        # Skip if no valid labels are found
+        if tf.size(class_ids) == 0:
+            return img, {"bboxes": tf.zeros((0, 4), dtype=tf.float32), "class_ids": tf.zeros((0,), dtype=tf.float32)}
+
+        return img, {"bboxes": bboxes, "class_ids": class_ids}
+
+    except tf.errors.InvalidArgumentError as e:
+        tf.print("Error parsing file:", image_path, label_path, e)
+        return img, {"bboxes": tf.zeros((0, 4), dtype=tf.float32), "class_ids": tf.zeros((0,), dtype=tf.float32)}
 
 
 def load_yolo_dataset(image_dir, label_dir, batch_size, target_size=(1024, 1024)):
@@ -156,14 +188,20 @@ def load_yolo_dataset(image_dir, label_dir, batch_size, target_size=(1024, 1024)
 
     dataset = tf.data.Dataset.zip((image_paths, label_paths))
 
-    def parse_fn(image_path, label_path):
-        img, img_width, img_height, scale, offset_y, offset_x = parse_image(image_path, target_size)
-        bboxes, class_ids = parse_yolo_labels(label_path, img_width, img_height, scale, offset_y, offset_x, target_size)
-
-        return img, {"bboxes": bboxes, "class_ids": class_ids}
-
     dataset = dataset.map(parse_fn, num_parallel_calls=tf.data.AUTOTUNE)
     dataset = dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
 
     return dataset
 
+
+if __name__ == '__main__':
+    dataset = load_yolo_dataset(
+        "/run/media/krw/PortableSSD/fall_2024_augmented_dataset/dataset_split/images/val",
+        "/run/media/krw/PortableSSD/fall_2024_augmented_dataset/dataset_split/labels/val",
+        batch_size=8
+    )
+    
+    for img, labels in dataset.take(1):
+        tf.print("Image Shape:", tf.shape(img))
+        tf.print("Bounding Boxes:", labels["bboxes"], summarize=-1)
+        tf.print("class IDs:", labels["class_ids"], summarize=-1)
